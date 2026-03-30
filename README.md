@@ -12,16 +12,6 @@ At the moment this implementation is for the chi2 model evaluation given a preco
 - `run_jax_photoz.sh`: Simple wrapper script for `fit` and optional `verify`
 - `plotting_fns.py`: Plot helpers currently kept with the implementation
 
-## Not included
-
-This repository intentionally excludes development and analysis scripts such as:
-
-- `compare_*.py`
-- `diagnose_chi2.py`
-- `inhouse_redshift_results.py`
-- `line_detection.py`
-- `make_consolidated_extended_forecast_products.py` (and variants/checkpoints)
-
 ## Setup
 
 1. Create and activate a Python environment.
