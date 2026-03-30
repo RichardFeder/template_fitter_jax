@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-photoz_jax.py  --  JAX/GPU photometric-redshift template fitting
+photoz_jax.py  --  JAX photometric-redshift template fitting
 
 Replicates the SPHEREx C++ photo-z pipeline (fitting_tools.cpp / photo_z.cpp)
-using batched matrix operations on GPU via JAX.
+using batched matrix operations via JAX.
 
 Algorithm
 ---------
@@ -56,7 +56,7 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
 # ---------------------------------------------------------------------------
-# JAX import -- disable memory pre-allocation so we control VRAM manually
+# JAX import -- disable memory pre-allocation so memory usage stays controlled
 # ---------------------------------------------------------------------------
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -669,18 +669,18 @@ def compute_pdfs_jax(
     precision: str = 'float64',
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Compute per-object P(z) PDFs using JAX on GPU.
+    Compute per-object P(z) PDFs using JAX.
 
     Two execution paths selected by ``multicore``:
 
-    Single-GPU  (multicore=False, default)
+    Single-device  (multicore=False, default)
         lax.scan over N_z/z_chunk chunks (z_chunk=2 → 751 steps instead of 1501).
         Within each scan step, vmap processes z_chunk z-bins in parallel.
         Objects are processed in Python batches of size batch_obj
         (batch_obj=0 means all objects at once).
 
-    Multi-GPU   (multicore=True)
-        pmap across all available devices (4×A100 on Perlmutter).
+    Multi-device   (multicore=True)
+        pmap across all available local devices.
         Same z-chunked vmap+scan within each device.
         batch_obj is interpreted as the *total* objects per outer step across
         all GPUs; each device receives batch_obj//n_dev objects per step.
@@ -744,11 +744,11 @@ def compute_pdfs_jax(
     _EPS = acc_dtype(1e-30)
 
     # ==================================================================
-    # Single-GPU path  (original lax.scan over individual z-bins)
+    # Single-device path
     # ==================================================================
     if not multicore:
         print(
-            f"  [jax] transferring grid to GPU  "
+            f"  [jax] transferring grid to active backend  "
             f"(fluxes {model_fluxes.nbytes/1e9:.2f} GB)...",
             flush=True,
         )
@@ -764,7 +764,7 @@ def compute_pdfs_jax(
             f_sq_grid_dev = (f_grid_base ** 2).astype(jnp.float32)
         tmpl_probs_dev   = jnp.array(tmpl_probs_np).astype(acc_dtype)  # [N_m]
         nonzero_mask_dev = jnp.array(nonzero_mask_np)
-        print(f"  [jax] grid on GPU in {time.time()-t0:.1f}s", flush=True)
+        print(f"  [jax] grid ready in {time.time()-t0:.1f}s", flush=True)
 
         @jit
         def process_batch(F_obs, W_obs, f_grid, f_sq_grid, tmpl_probs, nonzero_mask):
@@ -834,13 +834,13 @@ def compute_pdfs_jax(
             all_best_tmpl_z[lo:hi] = tids_np[best_m_np].T
 
         print(
-            f"  [jax single] all batches done — {time.time()-t_start:.2f}s total",
+            f"  [jax single] all batches done -- {time.time()-t_start:.2f}s total",
             flush=True,
         )
         return all_pdfs, all_min_chi2_z, all_best_tmpl_z
 
     # ==================================================================
-    # Multi-GPU path  (pmap across all local devices)
+    # Multi-device path (pmap across all local devices)
     # ==================================================================
 
     # Pad N_z to a multiple of z_chunk for the vmapped multi-GPU scan
@@ -863,7 +863,7 @@ def compute_pdfs_jax(
     print(f"  [jax] grid prepared in {time.time()-t0:.1f}s", flush=True)
 
     # ==================================================================
-    # Multi-GPU path  (pmap across all local devices)
+    # Multi-device path (pmap across all local devices)
     # ==================================================================
     devices = jax.local_devices()
     n_dev   = len(devices)
@@ -946,7 +946,7 @@ def compute_pdfs_jax(
 
         print(
             f"  [jax multi] batch {b+1}/{n_outer}  "
-            f"obj {lo}–{lo+n_valid-1}  ({n_valid} valid, {n_dev} GPUs)",
+            f"obj {lo}-{lo+n_valid-1}  ({n_valid} valid, {n_dev} devices)",
             flush=True,
         )
         t_b = time.time()
@@ -975,10 +975,49 @@ def compute_pdfs_jax(
         all_best_tmpl_z[lo:lo+n_valid] = tids_np[bm_np]
 
     print(
-        f"  [jax multi] done — {time.time()-t_start:.2f}s total ({n_outer} outer batch(es))",
+            f"  [jax multi] done -- {time.time()-t_start:.2f}s total ({n_outer} outer batch(es))",
         flush=True,
     )
     return all_pdfs, all_min_chi2_z, all_best_tmpl_z
+
+
+def configure_backend(backend: str, multicore: bool) -> bool:
+    """Configure JAX backend and return the effective multicore setting."""
+    backend_norm = str(backend).lower()
+    if backend_norm not in ("auto", "cpu", "gpu"):
+        raise ValueError(f"Unsupported backend '{backend}'. Valid: auto,cpu,gpu")
+
+    if backend_norm == "cpu":
+        jax.config.update("jax_platform_name", "cpu")
+    elif backend_norm == "gpu":
+        jax.config.update("jax_platform_name", "gpu")
+
+    active_backend = jax.default_backend()
+
+    if backend_norm == "gpu" and active_backend != "gpu":
+        raise RuntimeError(
+            "--backend gpu was requested but no GPU backend is available. "
+            "Use --backend auto or --backend cpu on this system."
+        )
+
+    if backend_norm == "cpu" and active_backend != "cpu":
+        raise RuntimeError(
+            f"--backend cpu was requested but active backend is '{active_backend}'."
+        )
+
+    if multicore and active_backend == "cpu":
+        print(
+            "[config] multicore requested with CPU backend; "
+            "falling back to single-device execution.",
+            flush=True,
+        )
+        multicore = False
+
+    print(
+        f"[config] backend requested={backend_norm}, active={active_backend}, multicore={multicore}",
+        flush=True,
+    )
+    return multicore
 
 
 # ===========================================================================
@@ -2537,7 +2576,7 @@ def run(
     """End-to-end: parse grid → read obs → fit → moments → save."""
 
     t_total = time.time()
-    print("\n=== SPHEREx Photo-z  (JAX/GPU) ===\n", flush=True)
+    print("\n=== SPHEREx Photo-z  (JAX) ===\n", flush=True)
 
     # 1. Parse model grid
     print("[1/4] Parsing model grid...", flush=True)
@@ -2573,8 +2612,8 @@ def run(
         max_template_id=int(template_ids.max()),
     )
 
-    # 4. GPU fitting
-    print("\n[3/4] Computing PDFs on GPU...", flush=True)
+    # 4. JAX fitting
+    print("\n[3/4] Computing PDFs with JAX backend...", flush=True)
     pdfs, min_chi2_perz, best_tmpl_perz = compute_pdfs_jax(
         obs_fluxes, obs_weights,
         model_fluxes, template_ids,
@@ -2628,7 +2667,7 @@ def run(
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="photoz_jax",
-        description="JAX/GPU template-fitting photo-z  (SPHEREx pipeline)",
+        description="JAX template-fitting photo-z  (SPHEREx pipeline)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -2657,7 +2696,13 @@ def main() -> None:
         type=int,
         default=10_000,
         metavar="N",
-        help="Objects per GPU batch (default: 10000)",
+        help="Objects per batch (default: 10000)",
+    )
+    p_fit.add_argument(
+        "--backend",
+        choices=["auto", "cpu", "gpu"],
+        default="auto",
+        help="Execution backend selection (default: auto)",
     )
     p_fit.add_argument(
         "--precision",
@@ -2669,7 +2714,7 @@ def main() -> None:
         "--multicore",
         action="store_true",
         default=False,
-        help="Use pmap across all available GPUs (multi-GPU path)",
+        help="Use pmap across all available local devices (multi-device path)",
     )
     p_fit.add_argument(
         "--min-source-snr",
@@ -2719,10 +2764,16 @@ def main() -> None:
     )
     p_vfy.add_argument("--batch-obj", type=int, default=10_000)
     p_vfy.add_argument(
+        "--backend",
+        choices=["auto", "cpu", "gpu"],
+        default="auto",
+        help="Execution backend selection (default: auto)",
+    )
+    p_vfy.add_argument(
         "--multicore",
         action="store_true",
         default=False,
-        help="Use pmap across all available GPUs (multi-GPU path)",
+        help="Use pmap across all available local devices (multi-device path)",
     )
     p_vfy.add_argument(
         "--precision",
@@ -2812,6 +2863,9 @@ def main() -> None:
         chosen = args.precision
         print(f"[config] selected precision: {chosen}", flush=True)
         jax.config.update("jax_enable_x64", chosen == "float64")
+
+    if hasattr(args, 'backend'):
+        args.multicore = configure_backend(args.backend, args.multicore)
 
     if args.cmd == "fit":
         run(

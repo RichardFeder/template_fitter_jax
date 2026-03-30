@@ -10,7 +10,7 @@ Usage:
   TEMPLATE_PROB="/path/to/template_prob.dat" \
   OUTPUT_REDSHIFTS="/path/to/output_redshifts.out" \
   OUTPUT_PDFS="/path/to/output_pdfs.out" \
-  ./run_jax_photoz.sh [--gpu N] [--batch-obj N] [--skip-verify]
+    ./run_jax_photoz.sh [--backend auto|cpu|gpu] [--gpu N] [--batch-obj N] [--skip-verify]
 
 Optional env vars:
   CPP_PDFS="/path/to/cpp_pdfs.out"     # If set and --skip-verify is not used, runs verify mode
@@ -23,6 +23,7 @@ EOF
 
 GPU_DEVICE="${GPU_DEVICE:-}"
 BATCH_OBJ="${BATCH_OBJ:-10000}"
+BACKEND="${BACKEND:-auto}"
 SKIP_VERIFY=0
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +44,14 @@ while [[ $# -gt 0 ]]; do
             BATCH_OBJ="$2"
             shift 2
             ;;
+        --backend)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --backend requires one of: auto,cpu,gpu" >&2
+                exit 1
+            fi
+            BACKEND="$2"
+            shift 2
+            ;;
         --skip-verify)
             SKIP_VERIFY=1
             shift
@@ -58,6 +67,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "${BACKEND}" != "auto" && "${BACKEND}" != "cpu" && "${BACKEND}" != "gpu" ]]; then
+    echo "Error: --backend must be one of: auto,cpu,gpu" >&2
+    usage >&2
+    exit 1
+fi
 
 for required_var in MODEL_GRID_GLOB OBS_PHOT TEMPLATE_PROB OUTPUT_REDSHIFTS OUTPUT_PDFS; do
     if [[ -z "${!required_var:-}" ]]; then
@@ -85,7 +100,8 @@ run_with_optional_gpu "${PYTHON_BIN}" "${SCRIPT_DIR}/photoz_jax.py" fit \
     "${TEMPLATE_PROB}" \
     "${OUTPUT_REDSHIFTS}" \
     --pdfs "${OUTPUT_PDFS}" \
-    --batch-obj "${BATCH_OBJ}"
+    --batch-obj "${BATCH_OBJ}" \
+    --backend "${BACKEND}"
 
 if [[ "${SKIP_VERIFY}" -eq 1 ]]; then
     echo "Skipping verify step (--skip-verify)."
@@ -103,6 +119,7 @@ run_with_optional_gpu "${PYTHON_BIN}" "${SCRIPT_DIR}/photoz_jax.py" verify \
     "${OBS_PHOT}" \
     "${TEMPLATE_PROB}" \
     --cpp-pdfs "${CPP_PDFS}" \
-    --batch-obj "${BATCH_OBJ}"
+    --batch-obj "${BATCH_OBJ}" \
+    --backend "${BACKEND}"
 
 echo "Done."
